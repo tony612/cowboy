@@ -5,8 +5,11 @@
 
 -export([init/2]).
 
-init(Req0, Opts) ->
+init(Req0, State) ->
+	% I thought State will be [{foo, 1}] when client sends a request at second time
+	io:fwrite("~p~n", [State]),
 	Req = cowboy_req:reply(200, #{
 		<<"content-type">> => <<"text/plain">>
 	}, <<"Hello world!">>, Req0),
-	{ok, Req, Opts}.
+	NewState = [{foo, 1}],
+	{ok, Req, NewState}.
