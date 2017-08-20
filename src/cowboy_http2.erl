@@ -46,6 +46,7 @@
 		{cowboy_stream:fin(), non_neg_integer(), iolist()
 			| {sendfile, non_neg_integer(), pos_integer(), file:name_all()}}),
 	local_buffer_size = 0 :: non_neg_integer(),
+	local_trailers = undefined :: map(),
 	%% Whether we finished receiving data.
 	remote = nofin :: cowboy_stream:fin(),
 	%% Remote flow control window (how much we accept to receive).
@@ -485,12 +486,14 @@ commands(State=#state{socket=Socket, transport=Transport, encode_state=EncodeSta
 	{HeaderBlock, EncodeState} = headers_encode(Headers, EncodeState0),
 	Transport:send(Socket, cow_http2:headers(StreamID, nofin, HeaderBlock)),
 	commands(State#state{encode_state=EncodeState}, Stream#stream{local=nofin}, Tail);
-%% send trailers headers and finish the stream
-commands(State=#state{socket=Socket, transport=Transport, encode_state=EncodeState0},
-		Stream=#stream{id=StreamID, local=nofin}, [{trailers, Headers}|Tail]) ->
-	{HeaderBlock, EncodeState} = headers_encode(Headers, EncodeState0),
-	Transport:send(Socket, cow_http2:headers(StreamID, fin, HeaderBlock)),
-	commands(State#state{encode_state=EncodeState}, Stream#stream{local=fin}, Tail);
+%% send trailers headers and finish the stream if there's no DATA in the queue
+commands(State0, Stream0=#stream{local=nofin, local_buffer_size=0},
+		[{trailers, Headers}|Tail]) ->
+	{State, Stream} = send_trailers(State0, Stream0, Headers),
+	commands(State, Stream, Tail);
+%% save trailers for sending later if there's DATA in the queue
+commands(State, Stream=#stream{local=nofin}, [{trailers, Headers}|Tail]) ->
+	commands(State, Stream#stream{local_trailers=Headers}, Tail);
 %% @todo headers when local!=idle
 %% Send a response body chunk.
 %%
@@ -595,6 +598,11 @@ status(<< H, T, U, _/bits >>) when H >= $1, H =< $9, T >= $0, T =< $9, U >= $0, 
 
 
 
+send_trailers(State=#state{socket=Socket, transport=Transport, encode_state=EncodeState0},
+		Stream=#stream{id=StreamID}, Headers) ->
+	{HeaderBlock, EncodeState} = headers_encode(Headers, EncodeState0),
+	Transport:send(Socket, cow_http2:headers(StreamID, fin, HeaderBlock)),
+	{State#state{encode_state=EncodeState}, Stream#stream{local=fin}}.
 
 %% @todo Should we ever want to implement the PRIORITY mechanism,
 %% this would be the place to do it. Right now, we just go over
@@ -615,6 +623,11 @@ resume_streams(State0, [Stream0|Tail], Acc) ->
 	{State, Stream} = send_data(State0, Stream0),
 	resume_streams(State, Tail, [Stream|Acc]).
 
+%% If there's buffered trailers, send it first.
+send_data(State0, Stream0=#stream{local=nofin, local_buffer_size=0, local_trailers=Headers})
+ 		when Headers /= undefined ->
+	{State, Stream} = send_trailers(State0, Stream0, Headers),
+	{State, Stream#stream{local=fin}};
 %% @todo We might want to print an error if local=fin.
 %%
 %% @todo It's possible that the stream terminates. We must remove it.
